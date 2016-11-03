@@ -1,3 +1,4 @@
+import fs from 'fs';
 import {
   parse,
   validate,
@@ -54,21 +55,55 @@ const relayGraphQLValidationRules = relayRuleNames.map((ruleName) => {
 const rules = {
   'template-strings'(context) {
     const {
+      // Schema via JSON object
       schemaJson,
+      // Or schema via filepath
+      watchSchemaJson, // absolute path to JSON file
+      watchInterval = 5000, // watch interval in ms for non-blocking setTimeout
+      // Rest common options
       env,
       tagName: tagNameOption,
     } = context.options[0];
 
     // Validate and unpack schema
+    let schema;
 
-    if (! schemaJson) {
-      throw new Error('Must pass in schemaJson option.');
+    function initSchema(json) {
+      const unpackedSchemaJson = json.data ? json.data : json;
+      if (! unpackedSchemaJson.__schema) {
+        throw new Error('Please pass a valid GraphQL introspection query result.');
+      }
+      schema = buildClientSchema(unpackedSchemaJson);
     }
 
-    const unpackedSchemaJson = schemaJson.data ? schemaJson.data : schemaJson;
+    function initSchemaFromFile(jsonFile) {
+      initSchema(JSON.parse(fs.readFileSync(jsonFile, 'utf8')));
+    }
 
-    if (! unpackedSchemaJson.__schema) {
-      throw new Error('Please pass a valid GraphQL introspection query result.');
+    if (schemaJson) {
+      initSchema(schemaJson);
+    } else if(watchSchemaJson) {
+      let prevMtime;
+      const watcherFn = () => {
+        try {
+          const stats = fs.statSync(watchSchemaJson);
+          if (stats) {
+            if (!prevMtime) prevMtime = stats.mtime;
+            if (stats.mtime.getTime() !== prevMtime.getTime()) {
+              prevMtime = stats.mtime;
+              initSchemaFromFile(watchSchemaJson);
+            }
+          }
+          setTimeout(watcherFn, watchInterval).unref(); // unref() allows exit to process
+        } catch (e) {
+          console.log('[eslint-plugin-graphql]', e);
+        }
+      };
+      initSchemaFromFile(watchSchemaJson);
+      watcherFn();
+    } else {
+      throw new Error('Must pass in `schemaJson` option with schema object '
+                    + 'or `watchSchemaJson` with absolute path to the json file.');
     }
 
     // Validate env
@@ -85,8 +120,6 @@ const rules = {
     } else {
       tagName = 'gql';
     }
-
-    const schema = buildClientSchema(unpackedSchemaJson);
 
     return {
       TaggedTemplateExpression(node) {
